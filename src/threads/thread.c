@@ -28,6 +28,9 @@ static struct list ready_list;
    when they are first scheduled and removed when they exit. */
 static struct list all_list;
 
+/* added: List of sleeping processes. */
+static struct list sleep_list;
+
 /* Idle thread. */
 static struct thread *idle_thread;
 
@@ -92,6 +95,7 @@ thread_init (void)
   lock_init (&tid_lock);
   list_init (&ready_list);
   list_init (&all_list);
+  list_init (&sleep_list);        /* added */
 
   /* Set up a thread structure for the running thread. */
   initial_thread = running_thread ();
@@ -240,6 +244,28 @@ thread_unblock (struct thread *t)
   list_push_back (&ready_list, &t->elem);
   t->status = THREAD_READY;
   intr_set_level (old_level);
+}
+
+/* added: compare wake up time */
+static bool
+wakeup_cmp (const struct list_elem *a, const struct list_elem *b, void *aux UNUSED)
+{
+  struct thread *ta = list_entry (a, struct thread, sleep_elem);
+  struct thread *tb = list_entry (b, struct thread, sleep_elem);
+  return ta->wakeup_ticks < tb->wakeup_ticks;
+}
+
+void
+thread_wakeup_sleepers (int64_t now)
+{
+  while (!list_empty (&sleep_list)) /*loop until all sleep wake*/
+    struct thread *t = list_entry (list_front (&sleep_list),
+                                   struct thread, sleep_elem);
+  if (t->wakeup_ticks > now)        /*For each tick: if there is no waking at this tick,
+                                      break and go to next tick*/
+    break;
+  list_pop_front (&sleep_list)      /*Ths first in the sleep list must wake now*/
+  thread_unblock (t);               /*put it into ready_list*/
 }
 
 /* Returns the name of the running thread. */
