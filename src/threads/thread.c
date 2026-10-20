@@ -257,12 +257,12 @@ wakeup_cmp (const struct list_elem *a, const struct list_elem *b, void *aux UNUS
 }
 
 void
-thread_wakeup_sleepers (int64_t now)
+thread_wakeup_sleepers (int64_t tick)
 {
   while (!list_empty (&sleep_list)) /*loop until all sleep wake*/
     struct thread *t = list_entry (list_front (&sleep_list),
                                    struct thread, sleep_elem);
-  if (t->wakeup_ticks > now)        /*For each tick: if there is no waking at this tick,
+  if (t->wakeup_ticks > tick)       /*For each tick: if there is no waking at this tick,
                                       break and go to next tick*/
     break;
   list_pop_front (&sleep_list)      /*Ths first in the sleep list must wake now*/
