@@ -265,7 +265,7 @@ thread_wakeup_sleepers (int64_t tick)
   if (t->wakeup_ticks > tick)       /*For each tick: if there is no waking at this tick,
                                       break and go to next tick*/
     break;
-  list_pop_front (&sleep_list)；    /*Ths first in the sleep list must wake now*/
+  list_pop_front (&sleep_list);     /*Ths first in the sleep list must wake now*/
   thread_unblock (t);               /*put it into ready_list*/
 }
 
