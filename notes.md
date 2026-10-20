@@ -1,5 +1,5 @@
 2026-10-20  baseline @ commit 046e4dc, tag=baseline
-7 pass: <把名单贴这>
+7 pass: 
 pass tests/threads/alarm-single
 pass tests/threads/alarm-multiple
 pass tests/threads/alarm-simultaneous
