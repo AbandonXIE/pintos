@@ -94,7 +94,7 @@ struct thread
     struct list_elem elem;              /* List element. */
 
     int64_t wakeup_ticks;               /* added: when to wake up */
-    struct list_elem sleepelem;         /* added: hanging on sleep list */
+    struct list_elem sleep_elem;        /* added: hanging on sleep list */
 
 #ifdef USERPROG
     /* Owned by userprog/process.c. */
