@@ -272,6 +272,24 @@ thread_wakeup_sleepers (int64_t tick)
   }
 }
 
+/* added */
+void
+thread_sleep (int64_t ticks)
+{
+  struct thread *cur = thread_current ();
+  enum intr_level old_level;
+
+  ASSERT (!intr_context ());
+  if (ticks <= 0)
+    return;
+
+  old_level = intr_disable ();
+  cur->wakeup_ticks = timer_ticks () + ticks;
+  list_insert_ordered (&sleep_list, &cur->sleep_elem, wakeup_cmp, NULL);
+  thread_block ();
+  intr_set_level (old_level);
+}
+
 /* Returns the name of the running thread. */
 const char *
 thread_name (void) 
