@@ -123,7 +123,7 @@ void thread_block (void);
 void thread_unblock (struct thread *);
 
 void thread_sleep (int64_t ticks);
-void thread_wakeup_sleepers (void);   /* added: will be used by timer_interrupt */
+void thread_wakeup_sleepers (int64_t tick);   /* added: will be used by timer_interrupt */
 
 struct thread *thread_current (void);
 tid_t thread_tid (void);
