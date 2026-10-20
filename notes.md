@@ -10,7 +10,7 @@
 - 规模：全套 27 个测试 → 7 pass / 20 FAIL
 - 稳定性：连跑 3 次，结果**逐行一致**，无 flaky
 
-### 强红线（pass→FAIL 立即停手回查）
+#### 强红线（pass→FAIL 立即停手回查）
 alarm-single
 alarm-multiple
 alarm-simultaneous
