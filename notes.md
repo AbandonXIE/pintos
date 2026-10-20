@@ -28,6 +28,11 @@ priority-sema / -condvar                → 阶段 A（唤醒后抢占）
 priority-donate-one/multiple/multiple2/nest/sema/lower/chain → 阶段 B
 mlfqs-load-1/load-60/load-avg/recent-1/nice-2/nice-10/block → 阶段 C
 
+#### 基线文件位置
+- 基线日志：/root/baseline-threads.log（若在 /home/student 则后者为准）
+- 强/弱红线名单：/root/baseline-pass.txt（7 行，sort 后顺序）
+- 每次回归：make check → /tmp/after-alarm.log → grep pass → diff 上面这个文件
+
 ### 0.2 回滚点验收（baseline tag）
 - baseline = 046e4dc "Add build workflow"，与 proj1 起点同一个 commit（纯净基线）
 - 验证方式：git worktree add /tmp/baseline-wt baseline && make → 退出码 0
