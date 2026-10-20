@@ -1,6 +1,8 @@
 # Pintos Project 1 笔记
 
-## 基线 baseline
+## 0. 实验之前
+
+### 基线 baseline
 - 日期：2026-10-20
 - commit：046e4dc
 - tag：baseline
@@ -15,11 +17,11 @@ alarm-simultaneous
 alarm-zero
 alarm-negative
 
-### 弱红线（判据宽松，RR 碰巧满足；稳定但不过度解读）
+#### 弱红线（判据宽松，RR 碰巧满足；稳定但不过度解读）
 mlfqs-fair-2
 mlfqs-fair-20
 
-### 20 个 FAIL = 路线图
+#### 20 个 FAIL = 路线图
 alarm-priority                          → 阶段 A 收尾（需先做闹钟主体）
 priority-change / -fifo / -preempt      → 阶段 A
 priority-sema / -condvar                → 阶段 A（唤醒后抢占）
