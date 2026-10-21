@@ -256,21 +256,21 @@ lock_try_acquire (struct lock *lock)
    make sense to try to release a lock within an interrupt
    handler. */
 void
-lock_release (struct lock *lock) 
+lock_release (struct lock *lock)
 {
   ASSERT (lock->holder == thread_current ());
   struct thread *cur = thread_current ();
 
-  if (lock->in_donations) {
-    list_remove (&lock->elem);
-    lock->in_donations = false;
-  }
+  if (lock->in_donations)
+    {
+      list_remove (&lock->elem);
+      lock->in_donations = false;
+    }
   lock->max_priority = 0;
-
   lock->holder = NULL;
 
   thread_update_priority (cur);
-
+  thread_reinherit (cur);
   sema_up (&lock->semaphore);
 }
 
