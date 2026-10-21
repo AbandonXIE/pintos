@@ -419,6 +419,37 @@ priority_more (const struct list_elem *a, const struct list_elem *b,
   return ta->priority > tb->priority;
 }
 
+/* Donate step 1: Reposition according to the sorting rule of ready_list */
+static void thread_resort_ready (struct thread *t) {
+  if (t->status == THREAD_READY) {
+    list_remove (&t->elem);
+    list_insert_ordered (&ready_list, &t->elem, priority_more, NULL);
+  }
+}
+
+/* Donate step 2: Recalculate effective priority */
+void thread_update_priority (struct thread *t) {
+  int max = t->base_priority;
+  struct list_elem *e;
+  for (e = list_begin (&t->donations); e != list_end (&t->donations); e = list_next (e)) {
+    struct lock *l = list_entry (e, struct lock, elem);
+    if (l->max_priority > max)
+      max = l->max_priority;
+  }
+  t->priority = max;
+  thread_resort_ready (t);
+}
+
+/* Donate step 3: Donation Action */
+void thread_donate_priority (struct thread *holder, struct lock *lock) {
+  if (holder == NULL) return;
+  if (!lock->in_donations) {
+    list_push_back (&holder->donations, &lock->elem);
+    lock->in_donations = true;
+  }
+  thread_update_priority (holder);
+}
+
 /* Sets the current thread's nice value to NICE. */
 void
 thread_set_nice (int nice UNUSED) 
