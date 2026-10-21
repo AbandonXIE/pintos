@@ -213,21 +213,25 @@ lock_acquire (struct lock *lock)
 {
   struct thread *cur = thread_current ();
 
-  if (lock->holder != NULL) {
-    cur->waiting_lock = lock;
+  ASSERT (!intr_context ());
+  ASSERT (!lock_held_by_current_thread (lock));
 
-    if (lock->max_priority < cur->priority)
-      lock->max_priority = cur->priority;
+  if (lock->holder != NULL)
+    {
+      cur->waiting_lock = lock;
 
-    thread_donate_priority (lock->holder, lock);
+      if (lock->max_priority < cur->priority)
+        lock->max_priority = cur->priority;
 
-    sema_down (&lock->semaphore);
-    cur->waiting_lock = NULL;
-  }
+      thread_donate_priority (lock->holder, lock);
+    }
+
+  sema_down (&lock->semaphore);
+  cur->waiting_lock = NULL;
 
   lock->holder = cur;
-
 }
+
 
 /* Tries to acquires LOCK and returns true if successful or false
    on failure.  The lock must not already be held by the current
