@@ -129,6 +129,7 @@ void thread_wakeup_sleepers (int64_t tick);
 ---
 
 ### 1.5 编译期踩坑记录（6 条报错 → 根因 → 修法）
+
 | # | 报错 | 根因 | 修法 |
 |---|---|---|---|
 | 1 | 'struct thread' has no member named 'sleep_elem'; did you mean 'sleepelem'? | 头文件成员名与 .c 里 list_entry 名字不一致 | 全项目统一 | sleep_elem |
@@ -191,28 +192,46 @@ if (t == idle_thread) idle_ticks++; else busy_ticks++;
 ---
 
 ### 1.7 语义层坑位清单（能编过但会跑错）
+
 | # | 坑 | 症状 | 正确做法 |
-| 1 | wakeup_ticks = ticks（存了相对值） | 早睡的线程提前醒 | timer_ticks () + ticks |
-| 2 | 算时间和入队之间没关中断 | 偶发睡过头，难复现 | intr_disable() 包住"取时间+入队+block" |
-| 3 | list_push_back 入队 | alarm-simultaneous 有线程被饿住 | list_insert_ordered + wakeup_cmp |
-| 4 | 没判 ticks <= 0 | alarm-zero/-negative 卡死 | 直接 return |
-| 5 | timer_interrupt 里先唤醒后 ticks++ | 唤醒永远慢一 tick，超时 | ticks++ 在前 |
-| 6 | thread_init 漏 list_init (&sleep_list) | 编译链接全过，一跑 Page Fault / 死循环 | 补上（"能编过 ≠ 能跑"的典型） |
-| 7 | 在 thread_wakeup_sleepers 里调 intr_disable() | 中断上下文无必要，易与断言冲突 | 中断里已是关的，直接操作 |
+|---|---|---|---|
+| 1 | 存了相对值：`wakeup_ticks = ticks` | 早睡的线程提前醒 | `timer_ticks () + ticks` |
+| 2 | 取时间与入队之间没关中断 | 偶发睡过头，难复现 | `intr_disable()` 包住「取时间 + 入队 + block」 |
+| 3 | `list_push_back` 入队 | `alarm-simultaneous` 有线程被饿住 | `list_insert_ordered` + `wakeup_cmp` |
+| 4 | 没判 `ticks <= 0` | `alarm-zero` / `alarm-negative` 卡死 | 直接 return |
+| 5 | `timer_interrupt` 里先唤醒后 `ticks++` | 唤醒永远慢一 tick，超时 | `ticks++` 在前 |
+| 6 | `thread_init` 漏 `list_init (&sleep_list)` | 编译链接全过，一跑 Page Fault / 死循环 | 补上（**"能编过 ≠ 能跑"** 的典型） |
+| 7 | `thread_wakeup_sleepers` 里调 `intr_disable()` | 中断上下文无必要，易与断言冲突 | 中断里已是关的，直接操作 |
+
+**判据小结**：1–5 属"逻辑对但时刻错"，靠 `alarm-*` 全套能抓；6–7 属"结构错"，
+表现为 PANIC / 断言失败，`make check` 立刻炸，不会藏。
 
 ---
 
 ### 1.8 调试工具箱（跨任务通用）
-| 场景 | 命令 | 怎么看 |
-| 声明有、定义无（undefined reference） | nm threads/thread.o  grep -i sleep | 要见 T thread_sleep、T thread_wakeup_sleepers（大写 T = 全局定义）；t 小写 = 被写成 static；什么都没有 = 没定义/嵌套/拼错；U timer_ticks 是引用，正常 |
-| 找残留忙等待 | grep -rn "thread_yield" devices/ | 应只在 timer.c 之外出现 |
-| 找半截实现 | make 2>&1  grep -E "unused-function|implicit" | 应无输出 |
-| 看失败详情 | cat tests/threads/<name>.result | 完整输出含 PANIC / Page Fault 回溯 |
-| 单跑 + 看内核输出 | pintos -v -- -q run alarm-multiple | -v 实时打印串口输出 |
-| 排除旧 .o 干扰 | make clean && make | 干净重建 |
-undefined reference 永远是"声明有、定义无" —— 先用 nm 看符号表，比反复读代码快得多。
 
----
+| 场景 | 命令 | 判读依据 |
+|---|---|---|
+| 声明有、定义无（`undefined reference`） | `nm threads/thread.o \| grep -i sleep` | 要见 `T thread_sleep`、`T thread_wakeup_sleepers`（**大写 T** = 全局定义）；**小写 t** = 被写成 `static`；**无输出** = 没定义 / 嵌套在别的函数里 / 名字拼错；`U timer_ticks` 是外部引用，正常 |
+| 找残留忙等待 | `grep -rn "thread_yield" devices/` | 应为空（`timer.c` 改造后不再调用 `thread_yield`） |
+| 找半截实现 | `make 2>&1 \| grep -E "unused-function\|implicit"` | 应无输出 |
+| 过滤已知噪音后看 warning | `make 2>&1 \| grep -E "warning\|error" \| grep -vE "noreturn\|frame-address\|nonnull-compare\|format-truncation"` | 应无输出 |
+| 看失败详情 | `cat tests/threads/<name>.result` | 完整输出含 PANIC / Page Fault 回溯 |
+| 单跑并看内核输出 | `pintos -v -- -q run alarm-multiple` | `-v` 实时打印串口输出 |
+| 排除旧 `.o` 干扰 | `make clean && make` | 干净重建 |
+
+**`nm` 符号字母速查**
+
+| 字母 | 含义 | 结论 |
+|---|---|---|
+| `T` | 全局（外部可见）定义 | ✅ 正确 |
+| `t` | 局部（`static`）定义 | ❌ 去掉 `static` |
+| `U` | 未定义引用（外部依赖） | 正常，说明只是调用方 |
+| 无该行 | 无此符号 | ❌ 没写 / 嵌套 / 拼错 |
+
+> **`undefined reference` 永远是「声明有、定义无」**——先用 `nm` 看符号表，
+> 比反复读代码快得多。
+
 
 ### 1.9 复用教训（带进 Task 2）
 
