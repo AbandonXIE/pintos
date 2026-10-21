@@ -432,23 +432,23 @@ thread_update_priority (struct thread *t)
   int max = t->base_priority;
   struct list_elem *e;
 
-  for (e = list_begin (&t->donations); e != list_end (&t->donations); e = list_next (e))
+  for (e = list_begin (&t->donations); e != list_end (&t->donations);
+       e = list_next (e))
     {
       struct lock *l = list_entry (e, struct lock, elem);
       if (l->max_priority > max)
         max = l->max_priority;
     }
+
+  if (max == t->priority)
+    return;
+
   t->priority = max;
 
   if (t->status == THREAD_READY)
     thread_resort_ready (t);
-  else if (t->status == THREAD_BLOCKED && t->waiting_lock != NULL)
-    {
-      list_remove (&t->elem);
-      list_insert_ordered (&t->waiting_lock->semaphore.waiters,
-                           &t->elem, priority_more, NULL);
-    }
 }
+
 
 /* Donate step 3: Donation Action */
 void
@@ -466,7 +466,7 @@ thread_donate_priority (struct thread *holder, struct lock *lock)
   int old = holder->priority;
   thread_update_priority (holder);
 
-  if (holder->priority != old && holder->waiting_lock != NULL)
+  if (holder->priority > old && holder->waiting_lock != NULL)
     {
       struct lock *up = holder->waiting_lock;
       if (up->max_priority < holder->priority)
