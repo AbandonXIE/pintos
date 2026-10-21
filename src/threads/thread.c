@@ -242,7 +242,7 @@ thread_unblock (struct thread *t)
 
   old_level = intr_disable ();
   ASSERT (t->status == THREAD_BLOCKED);
-  list_push_back (&ready_list, &t->elem);
+  list_insert_ordered (&ready_list, &t->elem, priority_more, NULL);   /* rewritten: use priority more logic instead */
   t->status = THREAD_READY;
   intr_set_level (old_level);
 }
@@ -356,7 +356,7 @@ thread_yield (void)
 
   old_level = intr_disable ();
   if (cur != idle_thread) 
-    list_push_back (&ready_list, &cur->elem);
+    list_insert_ordered (&ready_list, &t->elem, priority_more, NULL);   /* rewritten: use priority more logic instead */
   cur->status = THREAD_READY;
   schedule ();
   intr_set_level (old_level);
@@ -391,6 +391,17 @@ int
 thread_get_priority (void) 
 {
   return thread_current ()->priority;
+}
+
+/* added: comparing function. It will return true if a shoule be listed before b.
+   We use > (NOT <) because elemrnts with higher priority will be liated forward. */
+bool
+priority_more (const struct list_elem *a, const struct list_elem *b,
+               void *aux UNUSED)
+{
+  const struct thread *ta = list_entry (a, struct thread, elem);
+  const struct thread *tb = list_entry (b, struct thread, elem);
+  return ta->priority > tb->priority;
 }
 
 /* Sets the current thread's nice value to NICE. */
