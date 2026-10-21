@@ -208,7 +208,7 @@ thread_create (const char *name, int priority,
 
   /* added: preempt immediately if new thread has higher priority. */
   if (t->priority > thread_current ()->priority)
-  thread_yield ();
+    thread_yield ();
 
   return tid;
 }
