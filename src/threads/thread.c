@@ -390,15 +390,12 @@ thread_set_priority (int new_priority)
   struct thread *cur = thread_current ();
 
   cur->base_priority = new_priority;
-  cur->priority = new_priority;
+  thread_update_priority (cur);
 
-  if (!list_empty (&ready_list))
-    {
-      struct thread *front = list_entry (list_front (&ready_list),
-                                         struct thread, elem);
-      if (front->priority > cur->priority)
-        thread_yield ();
-    }
+  if (!list_empty (&ready_list)
+      && list_entry (list_front (&ready_list), struct thread, elem)->priority
+         > cur->priority)
+    thread_yield ();
 }
 
 /* Returns the current thread's priority. */
@@ -420,7 +417,8 @@ priority_more (const struct list_elem *a, const struct list_elem *b,
 }
 
 /* Donate step 1: Reposition according to the sorting rule of ready_list */
-static void thread_resort_ready (struct thread *t) {
+static void
+thread_resort_ready (struct thread *t) {
   if (t->status == THREAD_READY) {
     list_remove (&t->elem);
     list_insert_ordered (&ready_list, &t->elem, priority_more, NULL);
@@ -428,26 +426,100 @@ static void thread_resort_ready (struct thread *t) {
 }
 
 /* Donate step 2: Recalculate effective priority */
-void thread_update_priority (struct thread *t) {
+void
+thread_update_priority (struct thread *t)
+{
   int max = t->base_priority;
   struct list_elem *e;
-  for (e = list_begin (&t->donations); e != list_end (&t->donations); e = list_next (e)) {
-    struct lock *l = list_entry (e, struct lock, elem);
-    if (l->max_priority > max)
-      max = l->max_priority;
-  }
+
+  for (e = list_begin (&t->donations); e != list_end (&t->donations); e = list_next (e))
+    {
+      struct lock *l = list_entry (e, struct lock, elem);
+      if (l->max_priority > max)
+        max = l->max_priority;
+    }
   t->priority = max;
-  thread_resort_ready (t);
+
+  if (t->status == THREAD_READY)
+    thread_resort_ready (t);
+  else if (t->status == THREAD_BLOCKED && t->waiting_lock != NULL)
+    {
+      list_remove (&t->elem);
+      list_insert_ordered (&t->waiting_lock->semaphore.waiters,
+                           &t->elem, priority_more, NULL);
+    }
 }
 
 /* Donate step 3: Donation Action */
-void thread_donate_priority (struct thread *holder, struct lock *lock) {
-  if (holder == NULL) return;
-  if (!lock->in_donations) {
-    list_push_back (&holder->donations, &lock->elem);
-    lock->in_donations = true;
-  }
+void
+thread_donate_priority (struct thread *holder, struct lock *lock)
+{
+  if (holder == NULL)
+    return;
+
+  if (!lock->in_donations)
+    {
+      list_push_back (&holder->donations, &lock->elem);
+      lock->in_donations = true;
+    }
+
+  int old = holder->priority;
   thread_update_priority (holder);
+
+  if (holder->priority != old && holder->waiting_lock != NULL)
+    {
+      struct lock *up = holder->waiting_lock;
+      if (up->max_priority < holder->priority)
+        up->max_priority = holder->priority;
+      thread_donate_priority (up->holder, up);
+    }
+}
+
+/* Falling back & replaying along the chain */
+void
+thread_reinherit (struct thread *t)
+{
+  struct lock *wl = t->waiting_lock;
+  struct list_elem *e;
+  int max = 0;
+
+  if (wl == NULL || wl->holder == NULL || wl->holder == t)
+    return;
+
+  for (e = list_begin (&wl->semaphore.waiters); e != list_end (&wl->semaphore.waiters); e = list_next (e))
+    {
+      struct thread *w = list_entry (e, struct thread, elem);
+      if (w->priority > max)
+        max = w->priority;
+    }
+  if (t->priority > max)
+    max = t->priority;
+
+  if (wl->max_priority != max)
+    {
+      wl->max_priority = max;
+      thread_update_priority (wl->holder);
+      thread_reinherit (wl->holder);
+    }
+}
+
+void
+lock_release (struct lock *lock)
+{
+  ASSERT (lock->holder == thread_current ());
+  struct thread *cur = thread_current ();
+
+  if (lock->in_donations)
+    {
+      list_remove (&lock->elem);
+      lock->in_donations = false;
+    }
+  lock->max_priority = 0;
+  lock->holder = NULL;
+
+  thread_update_priority (cur);
+  thread_reinherit (cur);
+  sema_up (&lock->semaphore);
 }
 
 /* Sets the current thread's nice value to NICE. */
