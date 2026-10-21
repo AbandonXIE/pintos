@@ -269,7 +269,6 @@ lock_release (struct lock *lock)
   lock->holder = NULL;
 
   thread_update_priority (cur);
-  thread_reinherit (cur);
   sema_up (&lock->semaphore);
 }
 
