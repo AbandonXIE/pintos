@@ -145,6 +145,12 @@ void thread_set_priority (int);
 bool priority_more (const struct list_elem *a, const struct list_elem *b,
                     void *aux);   /* added */
 
+static void thread_resort_ready (struct thread *t) 
+void thread_update_priority (struct thread *t)
+void thread_donate_priority (struct thread *holder, struct lock *lock)
+
+void thread_reinherit (struct thread *t)
+
 int thread_get_nice (void);
 void thread_set_nice (int);
 int thread_get_recent_cpu (void);
