@@ -221,10 +221,6 @@ lock_acquire (struct lock *lock)
 
     thread_donate_priority (lock->holder, lock);
 
-    if (cur->priority < lock->holder->priority
-        && lock->holder->status == THREAD_READY)
-      thread_yield ();
-
     sema_down (&lock->semaphore);
     cur->waiting_lock = NULL;
   }
