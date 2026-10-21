@@ -195,6 +195,9 @@ lock_init (struct lock *lock)
 
   lock->holder = NULL;
   sema_init (&lock->semaphore, 1);
+
+  lock->max_priority = 0;
+  lock->in_donations = false;
 }
 
 /* Acquires LOCK, sleeping until it becomes available if
