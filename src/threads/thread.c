@@ -503,25 +503,6 @@ thread_reinherit (struct thread *t)
     }
 }
 
-void
-lock_release (struct lock *lock)
-{
-  ASSERT (lock->holder == thread_current ());
-  struct thread *cur = thread_current ();
-
-  if (lock->in_donations)
-    {
-      list_remove (&lock->elem);
-      lock->in_donations = false;
-    }
-  lock->max_priority = 0;
-  lock->holder = NULL;
-
-  thread_update_priority (cur);
-  thread_reinherit (cur);
-  sema_up (&lock->semaphore);
-}
-
 /* Sets the current thread's nice value to NICE. */
 void
 thread_set_nice (int nice UNUSED) 
