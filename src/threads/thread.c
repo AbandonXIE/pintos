@@ -148,6 +148,26 @@ thread_tick (void)
   if (++thread_ticks >= TIME_SLICE)
     intr_yield_on_return ();
 
+  if (thread_mlfqs) {
+    /* for every tick, recent_cpu += 1 */
+    if (t != idle_thread) t->recent_cpu = fixed_add_int (t->recent_cpu, 1);
+   
+    /* renew load_svg every second */
+    if (timer_ticks() % TIMER_FREQ == 0) {
+      int ready = list_size (&ready_list) + (t != idle_thread ? 1 : 0);
+      load_avg = fixed_div_int (
+                 fixed_add (fixed_mul_int (load_avg, 59), int_to_fixed (ready)),
+                 60);
+     
+      /* decay all threads' recent_cpu per second */
+      struct list_elem *e;
+      for (e = list_begin (&all_list); e != list_end (&all_list); e = list_next (e)) {
+        struct thread *th = list_entry (e, struct thread, allelem);
+        th->recent_cpu = fixed_add_int(fixed_mul(fixed_div(fixed_mul_int(load_avg, 2), fixed_add_int(fixed_mul_int(load_avg, 2), 1)), th->recent_cpu), th->nice);
+      }
+    }
+  }
+
   /* every 4 ticks: recalculate + rearrange + compromise */
   if (thread_mlfqs && timer_ticks() % 4 == 0) {
     struct list_elem *e;
@@ -161,8 +181,6 @@ thread_tick (void)
       intr_yield_on_return();
     }
   }
-
-  
 }
 
 /* Prints thread statistics. */
