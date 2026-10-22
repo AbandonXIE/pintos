@@ -76,7 +76,7 @@ static void schedule (void);
 void thread_schedule_tail (struct thread *prev);
 static tid_t allocate_tid (void);
 
-static int load_avg = 0   /* added */
+static int load_avg = 0;   /* added */
 
 /* Initializes the threading system by transforming the code
    that's currently running into a thread.  This can't work in
@@ -527,7 +527,7 @@ int
 thread_get_load_avg (void) 
 {
   /* Not yet implemented. */
-  return 100 * load_avg;
+  return fixed_to_int_round (fixed_mul_int (thread_current ()->load_avg, 100));
 }
 
 /* Returns 100 times the current thread's recent_cpu value. */
@@ -535,7 +535,7 @@ int
 thread_get_recent_cpu (void) 
 {
   /* Not yet implemented. */
-  return 100 * recent_cpu;
+  return fixed_to_int_round (fixed_mul_int (thread_current ()->recent_cpu, 100));
 }
 
 /* Idle thread.  Executes when no other thread is ready to run.
