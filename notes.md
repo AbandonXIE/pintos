@@ -679,3 +679,482 @@ Task 2 与 Task 1 不同：这里 diff 必须变，新增 12 条 pass（含 alar
 **判据**：开工前先回归 Task 2 那 12 条（捐赠 7 + 回归 5）保持全绿；改完看 `mlfqs-recent-1` / `mlfqs-load-avg` 的数值序列，不看 `Powering off...`。
 
 > **一句话交接**：Task 2 交出「`priority` 单一写者 + 三个用途三个独立 `elem` + 不依赖中断抢占的唤醒链」，Task 3 不重写，只换写者、关捐赠、补定点数。
+
+## 3. Task 3：多级反馈队列调度器（MLFQS）
+
+### 3.0 一句话结论
+
+把「每个线程自管 `priority` + 捐赠」改成「调度器每 4 tick 用公式 `PRI_MAX - recent_cpu/4 - nice*2` 统一重算优先级」，即 4.4BSD 高级调度器。
+
+- **完成日期**：2026-10-22
+- **起点 commit**：`task2-priority`
+- **改动文件**：`threads/thread.h` / `threads/thread.c` / `threads/synch.c` / **新增** `threads/fixed-point.h`
+  （改 3、增 1，无 `Makefile` 改动）
+
+**最终成绩：27/27 全绿**
+
+| 组 | 条数 | 结果 |
+|---|---|---|
+| MLFQS `mlfqs-*` | 9 | 全绿 |
+| 回归 alarm（Task1） | 6 | 不退步 |
+| 回归 priority（Task2） | 12 | 不退步 |
+
+- MLFQS 9：`load-1` / `load-60` / `load-avg` / `recent-1` / `fair-2` / `fair-20` / `nice-2` / `nice-10` / `block`
+
+与 Task 2 的关键差别：**Task 3 的��换写者」，不是「重写」**。
+`priority` 字段还在、还被 `ready_list` / `sema->waiters` 用来排序，只是它的**唯一写者**从「`max(base, 捐赠)`」换成了「4 tick 公式」。
+所以顺序必须是：**先让 MLFQS 与捐赠共存（只关捐赠、不关排序/唤醒/抢占），再换写者**。顺序搞反——一上来把排序或抢占也 `!thread_mlfqs` 关掉——会连 `mlfqs-block` 一起炸（见 3.6 坑②）。
+
+---
+
+### 3.1 可验收判据（五条，缺一不可）
+
+| # | 判据 | 怎么查 |
+|---|---|---|
+| A | 9 条 `mlfqs-*` 全 pass | `make check` / 单跑 `.result` |
+| B | alarm 6 + priority 12 全部不退步，总 27/27 | 同上 |
+| C | 编译零 error，无 `multiple definition` / `unused-function` / `implicit-declaration` | 3.7 ① |
+| D | **数值真的对**：`mlfqs-recent-1` / `mlfqs-load-avg` 逐秒序列匹配，不是只看 `Powering off...` | 3.7 ④ |
+| E | **定点数正确**：`1.5×1.5=2.25`、`1.0/3.0≈0.333`、负数取整方向对、`100×100` 不溢出 | 3.9 |
+
+> ⚠️ **判据 D 是 Task 3 最阴的一条**：全部公式写对、`Powering off...` 也会出现，但只要 `recent_cpu` 少衰减一次、`×100` 漏取整一个，**全程不 PANIC、不挂、就悄悄 FAIL**。唯一靠得住的是看 `mlfqs-recent-1` 每秒打印的数值序列。
+
+---
+
+### 3.2 设计决策（8 条语义约定，写代码前定死）
+
+| # | 约定 | 内容 | 违反后的症状 |
+|---|---|---|---|
+| 1 | 定点数 16.14 | `f = 1<<14 = 16384`；**先乘后除**；中间量 `int64_t`；**绝不用浮点** | 溢出/精度静默丢失，不报错 |
+| 2 | 三档更新节奏 | 每 tick（`recent_cpu += 1`）、每 4 tick（优先级）、每秒（`load_avg` + `recent_cpu` 衰减） | 数值爆炸或几乎不更新 |
+| 3 | 更新顺序 | `+1` → 每秒（先 `load_avg` 后 `recent_cpu`）→ 每 4 tick（重算优先级） | 优先级用到旧 `recent_cpu` |
+| 4 | idle 排除 | `recent_cpu += 1` 跳过 idle；`ready_threads` 不含 idle | `load_avg` / `recent_cpu` 偏高 |
+| 5 | getter 返回 ×100 | `thread_get_recent_cpu` / `thread_get_load_avg` 返回 **100×、就近取整** | `recent_1` / `load_*` 全红 |
+| 6 | `-mlfqs` 接线 | `thread_create` 忽略 `priority`、`thread_set_priority` 直接 return、`thread_get_priority` 返回 `priority` | 手工优先级与公式互抢 |
+| 7 | 捐赠隔离 | `!thread_mlfqs` **只包捐赠**；排序/唤醒/抢占两模式都要 | 关多了 → 锁/唤醒在 mlfqs 下全废 |
+| 8 | 单一写者 | mlfqs 下 `priority` 只由 `mlfqs_priority` 写，`thread_update_priority` 开头 early-return | 两写者并存 → 数值抖动、无 warning |
+
+> **约定 7（本任务最大雷区）**：`list` / `sema->waiters` / `ready_list` 排序、`sema_up` 的「唤醒 + 抢占」都是**两模式都要**。只有「优先级捐赠」那套才 `!thread_mlfqs` 关掉。
+> 一句话：**`if (!thread_mlfqs)` 永远不要包住 `thread_unblock` / `sema->value++` / `sema_down` / `lock->holder=` / `list_sort`。**
+
+---
+
+### 3.3 改动清单（文件 → 位置 → 改动）
+
+| 文件 | 位置 | 改动 |
+|---|---|---|
+| `threads/fixed-point.h` | 新增 | 16.14 定点库：转换/加减乘除全套，全 `static inline`（不改 Makefile） |
+| `threads/thread.h` | `struct thread` | 新增 `int nice;` `int recent_cpu;`（定点） |
+| `threads/thread.h` | 声明区 | 新增 `thread_set_nice` / `thread_get_nice` / `thread_get_recent_cpu` / `thread_get_load_avg` 原型 |
+| `threads/thread.c` | 顶部 | `#include "fixed-point.h"`、`#include "devices/timer.h"` |
+| `threads/thread.c` | 文件作用域 | `static int load_avg = 0;`；`mlfqs_priority` 前向声明 |
+| `threads/thread.c` | `init_thread()` | `t->nice = 0; t->recent_cpu = 0;` |
+| `threads/thread.c` | 新增 `mlfqs_priority` | 公式 + trunc + clamp [0,63] |
+| `threads/thread.c` | `thread_tick()` | 三档更新（`+1`／每秒／4 tick） |
+| `threads/thread.c` | `thread_set_nice()` | 存 nice，mlfqs 下立即重算+重排+按需 yield |
+| `threads/thread.c` | `thread_get_*` 4 个 | nice 直返；recent_cpu / load_avg 返回 ×100 就近取整 |
+| `threads/thread.c` | `thread_create()` | mlfqs 下公式定初值；末尾抢占加 `!thread_mlfqs` |
+| `threads/thread.c` | `thread_set_priority()` | 开头 `if (thread_mlfqs) return;` |
+| `threads/thread.c` | `thread_update_priority()` | 开头 `if (thread_mlfqs) return;` |
+| `threads/synch.c` | `sema_up()` | `unblock`+`value++` 两模式都跑；`need_yield` **两模式都判**；唤醒前 `list_sort` 重排 waiters |
+| `threads/synch.c` | `lock_acquire()` | 捐赠块 `!thread_mlfqs`；`sema_down` 与 `holder=cur` **无条件** |
+| `threads/synch.c` | `lock_release()` | 摘除/重算 `!thread_mlfqs`；`holder=NULL` 与 `sema_up` **无条件** |
+
+> `devices/` / `lib/` / `tests/` / `init.c` / `palloc.c`：**零改动**。
+
+---
+
+### 3.4 关键代码（最终形态）
+
+#### `threads/fixed-point.h`
+
+```c
+#ifndef THREADS_FIXED_POINT_H
+#define THREADS_FIXED_POINT_H
+#include <stdint.h>
+
+#define FP_SHIFT 14
+#define FP_F     (1 << FP_SHIFT)        /* f = 16384 */
+
+typedef int fp_t;
+
+static inline fp_t int_to_fixed (int n)        { return n * FP_F; }
+static inline int  fixed_to_int_trunc (fp_t x) { return x / FP_F; }
+static inline int  fixed_to_int_round (fp_t x) {
+  return (x >= 0) ? (x + FP_F / 2) / FP_F : (x - FP_F / 2) / FP_F;
+}
+static inline fp_t fixed_add (fp_t a, fp_t b)      { return a + b; }
+static inline fp_t fixed_sub (fp_t a, fp_t b)      { return a - b; }
+static inline fp_t fixed_add_int (fp_t x, int n)   { return x + n * FP_F; }
+static inline fp_t fixed_sub_int (fp_t x, int n)   { return x - n * FP_F; }
+static inline fp_t fixed_mul (fp_t a, fp_t b)      { return (fp_t)((int64_t)a * b / FP_F); }
+static inline fp_t fixed_mul_int (fp_t x, int n)   { return x * n; }
+static inline fp_t fixed_div (fp_t a, fp_t b)      { return (fp_t)((int64_t)a * FP_F / b); }
+static inline fp_t fixed_div_int (fp_t x, int n)   { return x / n; }
+
+#endif
+```
+优先级计算 + 三档更新
+c
+Copy
+static int
+mlfqs_priority (int recent_cpu, int nice)
+{
+  int p = PRI_MAX
+        - fixed_to_int_trunc (fixed_div_int (recent_cpu, 4))
+        - nice * 2;
+  if (p < PRI_MIN) p = PRI_MIN;
+  if (p > PRI_MAX) p = PRI_MAX;
+  return p;
+}
+
+void
+thread_tick (void)
+{
+  struct thread *t = thread_current ();
+  /* ... 原有统计 / TIME_SLICE 抢占 ... */
+
+  if (thread_mlfqs)
+    {
+      /* ① 每 tick：运行线程 recent_cpu += 1（非 idle） */
+      if (t != idle_thread)
+        t->recent_cpu = fixed_add_int (t->recent_cpu, 1);
+
+      /* ② 每秒：先 load_avg，再衰减所有线程 recent_cpu */
+      if (timer_ticks () % TIMER_FREQ == 0)
+        {
+          struct list_elem *e;
+          int ready = list_size (&ready_list) + (t != idle_thread ? 1 : 0);
+
+          load_avg = fixed_div_int (
+                       fixed_add (fixed_mul_int (load_avg, 59),
+                                  int_to_fixed (ready)), 60);
+
+          for (e = list_begin (&all_list); e != list_end (&all_list);
+               e = list_next (e))
+            {
+              struct thread *th = list_entry (e, struct thread, allelem);
+              int coef = fixed_div (fixed_mul_int (load_avg, 2),
+                                    fixed_add_int (fixed_mul_int (load_avg, 2), 1));
+              th->recent_cpu = fixed_add_int (
+                                 fixed_mul (coef, th->recent_cpu), th->nice);
+            }
+        }
+
+      /* ③ 每 4 tick：重算优先级 + 重排 + 抢占 */
+      if (timer_ticks () % 4 == 0)
+        {
+          struct list_elem *e;
+          for (e = list_begin (&all_list); e != list_end (&all_list);
+               e = list_next (e))
+            {
+              struct thread *th = list_entry (e, struct thread, allelem);
+              th->priority = mlfqs_priority (th->recent_cpu, th->nice);
+            }
+          list_sort (&ready_list, priority_more, NULL);
+          if (!list_empty (&ready_list)
+              && list_entry (list_front (&ready_list), struct thread, elem)->priority
+                 > t->priority)
+            intr_yield_on_return ();
+        }
+    }
+}
+getter（×100 就近取整）+ set_nice
+```c
+int thread_get_nice (void)        { return thread_current ()->nice; }
+
+int thread_get_recent_cpu (void) {
+  return fixed_to_int_round (
+           fixed_mul_int (thread_current ()->recent_cpu, 100));
+}
+
+int thread_get_load_avg (void) {
+  return fixed_to_int_round (fixed_mul_int (load_avg, 100));
+}
+
+void
+thread_set_nice (int nice)
+{
+  struct thread *t = thread_current ();
+  t->nice = nice;
+  if (thread_mlfqs)
+    {
+      t->priority = mlfqs_priority (t->recent_cpu, t->nice);
+      if (!list_empty (&ready_list)
+          && list_entry (list_front (&ready_list), struct thread, elem)->priority
+             > t->priority)
+        thread_yield ();
+    }
+}
+```
+-mlfqs 接线
+```c
+/* thread_create：忽略 priority 参数 */
+if (thread_mlfqs)
+  t->priority = mlfqs_priority (t->recent_cpu, t->nice);
+...
+thread_unblock (t);
+if (!thread_mlfqs && t->priority > thread_current ()->priority)
+  thread_yield ();
+
+/* thread_set_priority / thread_update_priority：开头即返回 */
+if (thread_mlfqs) return;
+
+/* thread_get_priority：返回有效优先级（两模式通用） */
+return thread_current ()->priority;
+```
+synch.c：只关捐赠，不关唤醒/排序/抢占
+```c
+void
+sema_up (struct semaphore *sema)
+{
+  enum intr_level old_level;
+  bool need_yield = false;
+
+  ASSERT (sema != NULL);
+  old_level = intr_disable ();
+  if (!list_empty (&sema->waiters))
+    {
+      list_sort (&sema->waiters, priority_more, NULL);      /* 唤醒前重排 */
+      struct thread *t = list_entry (list_pop_front (&sema->waiters),
+                                     struct thread, elem);
+      thread_unblock (t);
+      if (t->priority > thread_current ()->priority)        /* 两模式都判 */
+        need_yield = true;
+    }
+  sema->value++;
+  intr_set_level (old_level);
+
+  if (need_yield)
+    {
+      if (intr_context ())
+        intr_yield_on_return ();
+      else
+        thread_yield ();
+    }
+}
+
+void
+lock_acquire (struct lock *lock)
+{
+  struct thread *cur = thread_current ();
+  ASSERT (!intr_context ());
+  ASSERT (!lock_held_by_current_thread (lock));
+
+  if (!thread_mlfqs && lock->holder != NULL)                /* 只关捐赠 */
+    {
+      cur->waiting_lock = lock;
+      if (lock->max_priority < cur->priority)
+        lock->max_priority = cur->priority;
+      thread_donate_priority (lock->holder, lock);
+    }
+
+  sema_down (&lock->semaphore);                            /* 无条件 */
+  if (!thread_mlfqs)
+    cur->waiting_lock = NULL;
+  lock->holder = cur;                                      /* 无条件 */
+}
+
+void
+lock_release (struct lock *lock)
+{
+  struct thread *cur = thread_current ();
+  ASSERT (lock->holder == thread_current ());
+
+  if (!thread_mlfqs)                                       /* 只关摘除/重算 */
+    {
+      if (lock->in_donations)
+        { list_remove (&lock->elem); lock->in_donations = false; }
+      lock->max_priority = 0;
+    }
+  lock->holder = NULL;                                     /* 无条件 */
+  if (!thread_mlfqs)
+    thread_update_priority (cur);
+  sema_up (&lock->semaphore);                              /* 无条件 */
+}
+```
+### 3.5 编译/链接期踩坑记录（7 条）
+
+| # | 报错 | 根因 | 修法 |
+|---|---|---|---|
+| 1 | `multiple definition of 'int_to_fixed' …`（链接期） | `fixed-point.h` 里的函数**没写 `static inline`**，每个 include 它的 `.c` 各生成一份外部符号 | 全部加 `static inline`（内部链接、各自一份、可内联） |
+| 2 | 值全是垃圾 / 运行乱走 | 函数**漏 `return`**（`fp_t f (int n){ n*FP_F; }`） | 每个非 void 函数都要 `return` |
+| 3 | `expected ':', ',', ';' … before 'int'` + 300+ 条 `'struct thread' has no member named ...` | `struct thread` 里新增成员 `int recent_cpu` **漏分号** → 整个结构体解析失败，所有成员"消失" | 补 `;`。见到成片 `no member named`，先回头看结构体定义 |
+| 4 | `static declaration of 'priority_more' follows non-static declaration` | `priority_more` 已在 `thread.h` 声明（非 static），又在 `thread.c` 加了 `static` 前向声明 | 删掉 `thread.c` 里的 static 前向声明；已在头文件的可直接用 |
+| 5 | `implicit declaration of function 'timer_ticks'` | `thread.c` 没 `#include "devices/timer.h"`，`timer_ticks()` 被当返回 `int`（实际 `int64_t`）→ 截断 | 顶部补 include |
+| 6 | `expected ',' or ';' before 'void'` / `before 'if'` | 声明语句漏分号（`int priority = …` / `int load_avg = 0`） | 补分号；这是本项目三次踩到的同一坑 |
+| 7 | `unused-function 'mlfqs_priority'` / `'wakeup_cmp'` | `-Wall` 的"写了半截"指纹：定义了没被调用 | 说明调用路径没接上，回去把 `thread_tick` 的 4-tick 块接上 |
+
+> **判据**：`multiple definition` = 头文件函数没 `static inline`（链接期）；`implicit declaration` = 缺声明（编译期）；`expected …; before 'void'` = 上一条声明漏分号。
+> **`thread.h` 一崩，全项目连带炸**，先修头文件再看别的。
+
+---
+
+### 3.6 运行时几大杀手（本任务核心教训）
+
+#### 坑 ① `sema_up` 整个函数体被 `if (!thread_mlfqs)` 包住
+
+| 项 | 内容 |
+|---|---|
+| 真相 | 为"隔离捐赠"，把 `sema_up` 的**整个 body**（含 `thread_unblock`、`sema->value++`）包进 `!thread_mlfqs` |
+| 后果 | mlfqs 下 `sema_up` 什么都不做 → 等待者永不唤醒、`value` 不增 → 用到锁的 `mlfqs-block` **卡死 / 缺行**；其它 mlfqs 测试只用 `timer_sleep`（走睡眠队列）所以侥幸不炸 |
+| 症状 | `mlfqs-block` 的 `.result` 缺失 `(mlfqs-block) ...got it.`（block 线程拿到锁后那行） |
+| 修法 | 只包**捐赠**；`unblock`/`value++`/`sema_down`/`holder=` **两模式都要** |
+
+#### 坑 ② `sema_up` 的抢占（`need_yield`）被 `!thread_mlfqs` 关掉
+
+| 项 | 内容 |
+|---|---|
+| 真相 | 误以为"MLFQS 的抢占只由 4 tick 负责"，把 `if (!thread_mlfqs && t->priority > current)` 里的抢占关掉 |
+| 后果 | main 释放锁唤醒 block 线程后不 yield → main 一路跑到 `end`，block 线程还没轮到 → 仍缺 `...got it.` |
+| 关键 | **唤醒时的优先级抢占两种模式都需要**。4 tick 抢占是"重算后调整"，`sema_up` 是"唤醒即抢占"，两者不冲突 |
+| 修法 | `if (t->priority > thread_current ()->priority) need_yield = true;`（去掉 `!thread_mlfqs`） |
+
+> 坑 ① + ② 是"隔离过度"的一体两面：**只关捐赠，别关唤醒和抢占。**
+
+#### 坑 ③ 捐赠改变优先级后 `sema->waiters` 没重排（`priority-donate-sema`）
+
+| 项 | 内容 |
+|---|---|
+| 场景 | L(PRI+1) 先阻塞在 sema；M(PRI+3) 后阻塞 → 排到 L 前；H 把优先级**捐赠**给 L（L→PRI+5），但 **L 在 waiters 里的位置没变**，仍在 M 后 |
+| 后果 | main 的 `sema_up` 弹出队首 = **M**（旧位置），L 醒不来 → 缺 `L downed semaphore / H acquired lock / H finished / L finished` |
+| 铁证 | `.result` 里 `Thread M finished.` 出现在 `Thread L downed semaphore.` 之前 |
+| 修法 | `sema_up` 唤醒前 `list_sort (&sema->waiters, priority_more, NULL);` —— 按**当前**优先级重排，队首才是真正最高者 |
+
+> 这个坑不影响 mlfqs（捐赠在 mlfqs 下关闭），但会让 **Task2 的 `priority-donate-sema` 一直红**——它其实是 Task 2 遗留，改 Task 3 的 `sema_up` 时顺带修掉。
+
+#### 坑 ④ 更新顺序错（先重算优先级、后更新 recent_cpu）
+
+| 项 | 内容 |
+|---|---|
+| 后果 | 4 tick 重算用**上一秒的旧** `recent_cpu`，fair / nice 数值漂移 |
+| 修法 | 严格按 `+1 → 每秒(load_avg → recent_cpu) → 4 tick(优先级)`，第二档必须在第三档之前 |
+
+---
+
+### 3.7 验收与证据
+
+#### ① 编译（按 CI 方式建 build）
+
+```bash
+cd /root/pintos/src/threads
+mkdir -p build/devices build/lib/kernel build/lib/user build/tests/threads build/threads
+cp ../Makefile.build build/Makefile
+cd build && make 2>&1 | grep -E "warning|error" \
+  | grep -vE "noreturn|frame-address|nonnull-compare|format-truncation"
+ls -l kernel.bin
+```
+应无输出（4 项基线噪音照旧忽略），kernel.bin 必须存在。 ⚠️ 改过 thread.h / synch.c 后做一次 rm -rf build 干净重建，防旧 .o 蒙混。
+
+#### ② 单跑 MLFQS 9 条
+```bash
+export PATH=$PATH:/root/pintos/src/utils
+cd /root/pintos/src/threads/build
+for t in load-1 load-60 load-avg recent-1 fair-2 fair-20 nice-2 nice-10 block; do
+  printf "%-10s " "$t"; timeout 60 pintos --qemu -- -mlfqs -q run mlfqs-$t 2>&1 | tail -1
+done
+```
+期望 9 行全 Powering off...。注意 MLFQS 必须带 -mlfqs。
+
+#### ③ 全套回归（27/27）
+```bash
+cd /root/pintos/src/threads
+make check 2>&1 | tee /tmp/after-mlfqs.log
+tail -1 /tmp/after-mlfqs.log          # 期望 0 of 27 tests failed.
+```
+#### ④ 数值判据（Task 3 的真正证据）
+```bash
+cd /root/pintos/src/threads/build
+pintos -- -mlfqs -q run mlfqs-recent-1 2>&1 | grep recent_cpu
+```
+看逐秒序列：recent_cpu 单调上升、load_avg 缓慢趋近稳定值。 ⚠️ 数值不对就 FAIL，Powering off... 不代表通过。
+
+.result 里若只有 Bochs 横幅、没有 Pintos 输出，说明该次运行没抓到 console（环境问题，假失败）——以单跑 + -v 实时输出为准。
+
+### 3.8 语义层坑位清单（能编过但会跑错）
+
+| # | 坑 | 症状 | 正确做法 |
+|---|---|---|---|
+| 1 | `×100` 漏取整 / 返回定点原值 | `recent-1` / `load-*` 数值全错 | `fixed_to_int_round(fixed_mul_int(x,100))` |
+| 2 | 每秒更新少了 `% TIMER_FREQ` | 每 tick 都衰减 → 数值爆炸 | `timer_ticks() % TIMER_FREQ == 0` |
+| 3 | `+1` / `+nice` 当普通整数加 | 少乘了 `f`，量纲错 | `fixed_add_int` / `int_to_fixed` |
+| 4 | `recent_cpu/4` 用 `round` 而非 `trunc` | fair 微偏 | `fixed_to_int_trunc` |
+| 5 | 乘/除没用 `int64_t` 中间量 | 溢出，数值变负/乱 | `fixed_mul` / `fixed_div`（库已处理） |
+| 6 | 除法写成 `x/y*f` | 精度被砍 | `x*f/y` |
+| 7 | `ready_threads` 漏了运行线程 / 算进 idle | `load_avg` 偏高偏低 | `list_size(ready) + (t!=idle?1:0)` |
+| 8 | 两个写者并存（`thread_update_priority` 没 early-return） | 数值抖动，**编译无 warning** | mlfqs 下开头 `return;` |
+| 9 | 4 tick 后没重排 `ready_list` | 高优先级不抢占 | `list_sort(&ready_list, priority_more, NULL)` |
+| 10 | 对 `running`（不在 ready_list）做 `list_remove` | 链表成环 | 只重排 `ready_list` 成员，`running` 不在其中 |
+
+> **判据小结**：1–3 属"数值错"，靠 `recent-1` / `load-*` 的逐秒序列抓；4–7 属"定点错"，靠手算对照抓；8–10 属"调度错"，靠 `fair` / `nice` 抓。
+
+---
+
+### 3.9 调试工具箱（在 1.8 / 2.9 基础上新增 4 条）
+
+| 场景 | 命令 | 判读 |
+|---|---|---|
+| 看 MLFQS 逐秒数值 | `pintos -- -mlfqs -q run mlfqs-recent-1 2>&1 \| grep recent_cpu` | 序列单调上升、`load_avg` 缓升 = 对；否则查 3.8 |
+| 定点数手算自测 | 临时 `printf` 打 `fixed_mul(int_to_fixed(3)/2, int_to_fixed(3)/2)` | `1.5×1.5` 应为 `36864`(2.25)；`100×100` 应为 `163840000`（验 int64） |
+| 看真实内核输出 | `cat tests/threads/mlfqs-block.result` | 缺 `...got it.` → 坑①②；缺 `M/L/H` 行 → 坑③ |
+| 确认 `sema_up` 没被误包 | `grep -n "thread_mlfqs" threads/synch.c` | 只应出现在**捐赠块**，不该包 `unblock` / `value++` / `sema_down` |
+| 确认没留旧 busy-wait | `grep -rn "timer_elapsed" devices/timer.c` | 应为空（Task1 已清除） |
+
+> ⚠️ `mlfqs-*` 的 `.ck` 是 **Perl 脚本**（`check_expected([<<'EOF'])`…`EOF;`），直接 `diff` 原始文件会满屏 Perl 干扰，看不出差异——看差异请用 `make check` 生成的 `.result` / `.errors`，或把 `EOF` 到 `EOF` 之间那段抽出来比。
+
+**定点数手算对照表（自测用）**
+
+| 表达式 | 期望真实值 | 期望定点值 |
+|---|---|---|
+| `int_to_fixed(1)` | 1.0 | 16384 |
+| `fixed_mul(1.5, 1.5)` | 2.25 | 36864 |
+| `fixed_mul(100, 100)` | 10000.0 | 163840000（验 int64 不溢出） |
+| `fixed_div(1.0, 3.0)` | ≈0.333 | 5461 |
+| `fixed_to_int_trunc(-7/2)` | -3 | — |
+| `fixed_to_int_round(-7/2)` | -4 | — |
+
+---
+
+### 3.10 复用教训（带进今后）
+
+1. **"隔离"要精准到子句**：`if (!thread_mlfqs)` 只包「捐赠」，不包「唤醒 / 排序 / 抢占 / 置 holder」。
+   包大了 = 锁在 mlfqs 下全废（3.6 坑①②）。判据：问一句"这个动作是不是只在手工优先级下才有意义？"
+2. **换写者 ≠ 重写**：`priority` 字段与 `ready_list` / `waiters` 排序全部沿用，只把"谁写它"换掉。
+   一上来推翻重写必撞 Task2 的 12 条回归。
+3. **数值型测试不能只看 exit**：`Powering off...` 只证明"跑完"，证明不了"算对"。
+   逐秒序列 + 手算定点才是证据（3.1-D、3.7④）。
+4. **`static inline` 是头文件函数默认形态**：不 `static` 会链接冲突（multiple definition），
+   不 `inline` 会 `unused-function` 警告（`-Werror` 下即编译失败）。
+5. **一次改动 = 一次干净重建**：改 `.h` 后旧 `.o` 会蒙混，`rm -rf build` 再编，别攒到最后。
+6. **缺失行定位法**：`.result` 里"少了哪行 / 顺序反了"直接指向"哪个动作没发生"——
+   缺 `...got it.` = 唤醒/抢占没发生；缺 `M/L/H` 行 = 唤醒到了错线程（重排问题）。
+
+---
+
+### 3.11 回滚点与坐标 / 移交
+
+```bash
+cd src/threads
+git add -A
+git commit -m "Task3: 4.4BSD MLFQS (fixed-point, recent_cpu/load_avg/nice, -mlfqs wiring)"
+git tag -a task3-mlfqs -m "Task3 done: 27/27, mlfqs 9 + regress 18"
+
+# 改动规模核对（应 4 files changed：增 fixed-point.h，改 thread.h/thread.c/synch.c）
+git diff task2-priority..task3-mlfqs --stat
+
+# 可选：独立 worktree 复验
+git worktree add /tmp/task3-wt task3-mlfqs
+cd /tmp/task3-wt/src/threads && make && make check 2>&1 | tail -3
+```
+坐标：task2-priority → task3-mlfqs（最终 27/27）
+期望 --stat：threads/fixed-point.h（新增）/ threads/thread.h / threads/thread.c / threads/synch.c，4 个文件
+期望 make check 尾行：0 of 27 tests failed.
+新增/改动的对外符号
+
+| 符号 | 类型 | 归属 | 说明 |
+|---|---|---|---|
+| mlfqs_priority | static 函数 | thread.c | 只本文件用；thread_tick 通过前向声明调用 |
+| load_avg | static 变量 | hread.c | 系统级，仅 thread.c 可见，别放头文件 |
+| thread_set_nice / thread_get_nice / thread_get_recent_cpu / thread_get_load_avg | 全局函数 | thread.c | 声明在 thread.h |
+| nice / recent_cpu	成员 | struct thread | recent_cpu | 为定点（int，语义 16.14） |
+
