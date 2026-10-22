@@ -527,7 +527,7 @@ int
 thread_get_load_avg (void) 
 {
   /* Not yet implemented. */
-  return fixed_to_int_round (fixed_mul_int (thread_current ()->load_avg, 100));
+  return fixed_to_int_round (fixed_mul_int (load_avg, 100));
 }
 
 /* Returns 100 times the current thread's recent_cpu value. */
