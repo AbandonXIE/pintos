@@ -8,9 +8,7 @@
 
 >> Fill in the names and email addresses of your group members.
 
-FirstName LastName <email@domain.example>
-FirstName LastName <email@domain.example>
-FirstName LastName <email@domain.example>
+Xie Qiyuan <xieqy2024@shanghaitech.edu.cn>
 
 ---- PRELIMINARIES ----
 
@@ -30,26 +28,51 @@ FirstName LastName <email@domain.example>
 >> `struct' member, global or static variable, `typedef', or
 >> enumeration.  Identify the purpose of each in 25 words or less.
 
+```
+/* threads/thread.h -- struct thread additions */
+int64_t wakeup_ticks;        /* absolute tick to wake at, not a duration */
+struct list_elem sleep_elem; /* node in sleep_list; never reuse thread->elem */
+
+void thread_sleep (int64_t ticks);          /* block caller for ticks */
+void thread_wakeup_sleepers (int64_t tick); /* wake all sleepers due at tick */
+
+/* threads/thread.c */
+static struct list sleep_list;  /* sleepers, ordered by wakeup_ticks ascending */
+static bool wakeup_cmp (...);   /* earlier deadline first */
+
+```
+devices/timer.c: no new state; the busy-wait loop and its start were deleted.
+
 ---- ALGORITHMS ----
 
 >> A2: Briefly describe what happens in a call to timer_sleep(),
 >> including the effects of the timer interrupt handler.
 
+If ticks <= 0, return. Otherwise disable interrupts, set wakeup_ticks = timer_ticks () + ticks, list_insert_ordered into sleep_list, thread_block (), restore level. Handler: ticks++, then pop and unblock every sleeper whose deadline <= ticks, then thread_tick ().
+
 >> A3: What steps are taken to minimize the amount of time spent in
 >> the timer interrupt handler?
+
+The sorted list plus early exit means the handler only touches threads that actually expire, and costs one comparison when none do. No allocation, locks, or schedule (); preemption is deferred with intr_yield_on_return (), and deadline arithmetic stays in thread context.
 
 ---- SYNCHRONIZATION ----
 
 >> A4: How are race conditions avoided when multiple threads call
 >> timer_sleep() simultaneously?
 
+sleep_list is the only shared datum and every access runs with interrupts off — mutual exclusion on a single CPU. A lock is impossible here: thread_block requires interrupts off, and the wakeup path executes in interrupt context, where blocking is illegal.
+
 >> A5: How are race conditions avoided when a timer interrupt occurs
 >> during a call to timer_sleep()?
+
+The window between computing the deadline and blocking is the hazard: an interrupt there would unblock a still-RUNNING thread and trip thread_unblock's assertion. Disabling interrupts across compute+insert+block makes the two events mutually exclusive. The handler must not re-disable.
 
 ---- RATIONALE ----
 
 >> A6: Why did you choose this design?  In what ways is it superior to
 >> another design you considered?
+
+Chosen over the busy-wait (spins the CPU, starves idle) and over a per-tick scan of all threads (O(threads) every tick). The ordered list gives O(1) per waking thread and a single comparison when nobody wakes. A separate sleep_elem avoids corrupting ready_list/waiters.
 
              PRIORITY SCHEDULING
              ===================
@@ -60,20 +83,70 @@ FirstName LastName <email@domain.example>
 >> `struct' member, global or static variable, `typedef', or
 >> enumeration.  Identify the purpose of each in 25 words or less.
 
+```
+/* threads/thread.h */
+int priority;               /* EFFECTIVE priority: what the scheduler sorts on */
+int base_priority;          /* requested by the thread; written only by
+                               thread_set_priority */
+struct lock *waiting_lock;  /* lock we are blocked on; edge for upward cascade */
+struct list donations;      /* locks donating to us; scanned for the maximum */
+
+struct lock;                /* forward decl; avoids prototype-scope warnings */
+bool priority_more (...);            /* descending priority */
+void thread_update_priority (struct thread *t);          /* recompute effective */
+void thread_donate_priority (struct thread *h, struct lock *l); /* + cascade */
+
+/* threads/synch.h */
+struct lock {
+  struct thread *holder;    /* NULL when free */
+  struct semaphore semaphore;
+  int max_priority;         /* highest priority among this lock's waiters */
+  bool in_donations;        /* is elem linked into holder->donations? */
+  struct list_elem elem;    /* node in holder->donations (its own elem) */
+};
+
+/* threads/synch.c */
+struct semaphore_elem { struct list_elem elem; struct thread *thread; int priority; };
+
+```
+
 >> B2: Explain the data structure used to track priority donation.
 >> Use ASCII art to diagram a nested donation.  (Alternately, submit a
 >> .png file.)
+
+```
+   H  base 30  eff 30    BLOCKED on B        (donates 30 to M)
+   | waiting_lock = &B
+   v
+ lock B  holder=M  max_priority=30  elem --> M.donations
+   |
+   v
+   M  base 20  eff 30    BLOCKED on A        (donates 30 to L)
+   | waiting_lock = &A
+   v
+ lock A  holder=L  max_priority=30  elem --> L.donations
+   |
+   v
+   L  base 10  eff 30    RUNNING             (inherits the whole chain)
+
+```
 
 ---- ALGORITHMS ----
 
 >> B3: How do you ensure that the highest priority thread waiting for
 >> a lock, semaphore, or condition variable wakes up first?
 
+Waiter lists are kept priority-ordered on insertion and re-sorted immediately before waking, because donation can raise a waiter's priority after it queued — exactly what broke priority-donate-sema. Same for semaphores, locks (binary semaphores), and condvar waiters ordered by sema_elem.
+
 >> B4: Describe the sequence of events when a call to lock_acquire()
 >> causes a priority donation.  How is nested donation handled?
 
+If the lock has a holder: record waiting_lock, raise lock->max_priority, link the lock into holder->donations, recompute the holder's effective priority. Nested case: if it rose and the holder is itself waiting on a lock, propagate to that lock's max_priority and its holder, recursively — only while rising.
+
 >> B5: Describe the sequence of events when lock_release() is called
 >> on a lock that a higher-priority thread is waiting for.
+
+Unlink the lock from the donations list, clear max_priority, clear holder (before waking), recompute own priority from the remaining donations, then sema_up wakes the highest waiter; yield (or intr_yield_on_return) if it outranks us.
 
 ---- SYNCHRONIZATION ----
 
@@ -81,10 +154,14 @@ FirstName LastName <email@domain.example>
 >> how your implementation avoids it.  Can you use a lock to avoid
 >> this race?
 
+Priority has two writers — thread_set_priority and donation — so write-base/recompute/yield is not atomic: a donation can be lost or we yield needlessly. We disable interrupts across the whole sequence and only ever write base_priority. A lock cannot work: donations arrive in interrupt context, and blocking recreates the inversion.
+
 ---- RATIONALE ----
 
 >> B7: Why did you choose this design?  In what ways is it superior to
 >> another design you considered?
+
+Base/effective split stops donation being overwritten; max-not-sum stops inflation; per-lock bookkeeping makes withdrawal exact; unconditional sema_down preserves mutual exclusion (making it conditional broke 6-of-7 silently); fixed release order avoids stale holders; > (not !=) makes the cascade terminate.
 
               ADVANCED SCHEDULER
               ==================
@@ -94,6 +171,31 @@ FirstName LastName <email@domain.example>
 >> C1: Copy here the declaration of each new or changed `struct' or
 >> `struct' member, global or static variable, `typedef', or
 >> enumeration.  Identify the purpose of each in 25 words or less.
+
+```
+/* threads/fixed-point.h (new, header-only ADT, all static inline) */
+#define FP_SHIFT 14
+#define FP_F (1 << FP_SHIFT)              /* f = 16384 */
+typedef int fp_t;
+static inline fp_t int_to_fixed (int n);
+static inline int  fixed_to_int_trunc (fp_t x);
+static inline int  fixed_to_int_round (fp_t x);
+static inline fp_t fixed_add/fixed_sub/fixed_add_int/fixed_sub_int (...);
+static inline fp_t fixed_mul/fixed_mul_int/fixed_div/fixed_div_int (...);
+
+/* threads/thread.h */
+int nice;        /* niceness, [-20, 20] */
+int recent_cpu;  /* fixed-point 16.14 CPU recency */
+void thread_set_nice (int nice);
+int thread_get_nice (void);
+int thread_get_recent_cpu (void);   /* returns 100x, rounded */
+int thread_get_load_avg (void);     /* returns 100x, rounded */
+
+/* threads/thread.c */
+static int load_avg = 0;                          /* system load, 16.14 */
+static int mlfqs_priority (int recent_cpu, int nice);  /* 4-tick recompute */
+
+```
 
 ---- ALGORITHMS ----
 
@@ -105,23 +207,27 @@ FirstName LastName <email@domain.example>
 timer  recent_cpu    priority   thread
 ticks   A   B   C   A   B   C   to run
 -----  --  --  --  --  --  --   ------
- 0
- 4
- 8
-12
-16
-20
-24
-28
-32
-36
+ 0      0   0   0  63  61  59     A
+ 4      4   0   0  62  61  59     A
+ 8      8   0   0  61  61  59     A
+12     12   0   0  60  61  59     B
+16     12   4   0  60  60  59     B
+20     12   8   0  60  59  59     A
+24     16   8   0  59  59  59     A
+28     20   8   0  58  59  59     B
+32     20  12   0  58  58  59     C
+36     20  12   4  58  58  58     C
 
 >> C3: Did any ambiguities in the scheduler specification make values
 >> in the table uncertain?  If so, what rule did you use to resolve
 >> them?  Does this match the behavior of your scheduler?
 
+Ambiguous: tie-breaking, whether tick 0 recomputes, and increment-versus-recompute order. Our rules: only a strictly higher ready thread preempts (the running thread keeps the CPU on ties); stable sort preserves FIFO, so B precedes C; the tick's +1 is applied before the 4-tick recompute. This matches our scheduler.
+
 >> C4: How is the way you divided the cost of scheduling between code
 >> inside and outside interrupt context likely to affect performance?
+
+Cheap and frequent inside the handler beats expensive and batched: one fixed-point add per tick, O(n) recompute plus one ready-list sort per 4 ticks, O(n) decay per second. Deferring them outside interrupt context would leave the running thread's priority stale for several ticks.
 
 ---- RATIONALE ----
 
@@ -130,12 +236,16 @@ ticks   A   B   C   A   B   C   to run
 >> time to work on this part of the project, how might you choose to
 >> refine or improve your design?
 
+Advantages: single writer for priority, small diff from part B, integer-only arithmetic. Disadvantages: O(n) scan and full sort in interrupt context every 4 ticks, only one ready list instead of per-priority queues, donation disabled so inversion is possible. With more time: per-level queues and dirty-flag recomputation.
+
 >> C6: The assignment explains arithmetic for fixed-point math in
 >> detail, but it leaves it open to you to implement it.  Why did you
 >> decide to implement it the way you did?  If you created an
 >> abstraction layer for fixed-point math, that is, an abstract data
 >> type and/or a set of functions or macros to manipulate fixed-point
 >> numbers, why did you do so?  If not, why not?
+
+A header-only ADT of static inline functions names the representation once, forces the int64_t intermediate, keeps trunc and round as distinct named operations, and avoids multiple-definition link errors at zero runtime cost. Inline (a*b)/f at each call site invites unit and overflow mistakes. Floating point is unavailable in the kernel.
 
                SURVEY QUESTIONS
                ================
@@ -149,14 +259,22 @@ the quarter.
 >> In your opinion, was this assignment, or any one of the three problems
 >> in it, too easy or too hard?  Did it take too long or too little time?
 
+Task 2 was the hardest: three of its bugs (uninitialised in_donations, conditional sema_down, unsorted waiters) compiled cleanly and produced PANICs or silent passes rather than wrong output. Part C was the most tedious; part A was the shortest and, misleadingly, the least verifiable.
+
 >> Did you find that working on a particular part of the assignment gave
 >> you greater insight into some aspect of OS design?
+
+That "tests pass" and "the feature works" are different claims: the alarm tests passed both before and after, and 6 of 7 donation tests passed while mutual exclusion was already broken.
 
 >> Is there some particular fact or hint we should give students in
 >> future quarters to help them solve the problems?  Conversely, did you
 >> find any of our guidance to be misleading?
 
+State explicitly that the alarm tests pass on the unmodified baseline, and that lock_release's assertion is the only test of mutual exclusion. Both cost us hours.
+
 >> Do you have any suggestions for the TAs to more effectively assist
 >> students, either for future quarters or the remaining projects?
+
+Point students at tests/threads/*.result as the authoritative record; piped console output under timeout drops the serial buffer and can disguise a pass as a failure.
 
 >> Any other comments?
