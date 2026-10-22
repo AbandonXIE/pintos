@@ -227,6 +227,9 @@ thread_create (const char *name, int priority,
   init_thread (t, name, priority);
   tid = t->tid = allocate_tid ();
 
+  if (thread_mlfqs)
+    t->priority = mlfqs_priority (t->recent_cpu, t->nice);
+
   /* Stack frame for kernel_thread(). */
   kf = alloc_frame (t, sizeof *kf);
   kf->eip = NULL;
@@ -246,7 +249,7 @@ thread_create (const char *name, int priority,
   thread_unblock (t);
 
   /* added: preempt immediately if new thread has higher priority. */
-  if (t->priority > thread_current ()->priority)
+  if (!thread_mlfqs && t->priority > thread_current ()->priority)
     thread_yield ();
 
   return tid;
@@ -426,6 +429,9 @@ thread_foreach (thread_action_func *func, void *aux)
 void
 thread_set_priority (int new_priority)
 {
+  if (thread_mlfqs)
+    return;
+   
   struct thread *cur = thread_current ();
 
   cur->base_priority = new_priority;
