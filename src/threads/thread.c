@@ -78,6 +78,8 @@ static tid_t allocate_tid (void);
 
 static int load_avg = 0;   /* added */
 
+static int mlfqs_priority (int recent_cpu, int nice);   /* added */
+
 /* Initializes the threading system by transforming the code
    that's currently running into a thread.  This can't work in
    general and it is possible in this case only because loader.S
@@ -127,6 +129,10 @@ thread_start (void)
 
 /* Called by the timer interrupt handler at each timer tick.
    Thus, this function runs in an external interrupt context. */
+static int  mlfqs_priority (int recent_cpu, int nice);
+static bool priority_more (const struct list_elem *a,
+                           const struct list_elem *b, void *aux);
+
 void
 thread_tick (void) 
 {
@@ -145,6 +151,22 @@ thread_tick (void)
   /* Enforce preemption. */
   if (++thread_ticks >= TIME_SLICE)
     intr_yield_on_return ();
+
+  /* every 4 ticks: recalculate + rearrange + compromise */
+  if (thread_mlfqs && timer_ticks() % 4 == 0) {
+    struct list_elem *e;
+    for (e = list_begin (&all_list); e != list_end (&all_list); e = list_next (e)) {
+      struct thread *th = list_entry (e, struct thread, allelem);
+      th->priority = mlfqs_priority (th->recent_cpu, th->nice);
+    }
+    list_sort (&ready_list, priority_more, NULL);
+    if (!list_empty (&ready_list)
+        && list_entry (list_front (&ready_list), struct thread, elem)->priority > t->priority) {
+      intr_yield_on_return();
+    }
+  }
+
+  
 }
 
 /* Prints thread statistics. */
@@ -506,19 +528,35 @@ thread_reinherit (struct thread *t)
     }
 }
 
+/* ---------- MLFQS ---------- */
+static int
+mlfqs_priority (int recent_cpu, int nice)
+{
+  int priority = PRI_MAX - fixed_to_int_trunc(fixed_div_int(recent_cpu, 4)) - (nice * 2);
+  if (priority < PRI_MIN) priority = PRI_MIN;
+  if (priority > PRI_MAX) priority = PRI_MAX;
+  return priority;
+}
+
 /* Sets the current thread's nice value to NICE. */
 void
 thread_set_nice (int nice) 
 {
-  /* Not yet implemented. */
-  thread_current()->nice = nice;
+  struct thread *t = thread_current();
+  t->nice = nice;
+  if (thread_mlfqs) {
+    t->priority = mlfqs_priority (t->recent_cpu, t->nice);
+    if (!list_empty(&ready_list)
+        && list_entry (list_front (&ready_list), struct thread, elem)->priority > t->priority) {
+      thread_yield();
+    }
+  }
 }
 
 /* Returns the current thread's nice value. */
 int
 thread_get_nice (void) 
 {
-  /* Not yet implemented. */
   return thread_current()->nice;
 }
 
@@ -526,7 +564,6 @@ thread_get_nice (void)
 int
 thread_get_load_avg (void) 
 {
-  /* Not yet implemented. */
   return fixed_to_int_round (fixed_mul_int (load_avg, 100));
 }
 
@@ -534,7 +571,6 @@ thread_get_load_avg (void)
 int
 thread_get_recent_cpu (void) 
 {
-  /* Not yet implemented. */
   return fixed_to_int_round (fixed_mul_int (thread_current ()->recent_cpu, 100));
 }
 
