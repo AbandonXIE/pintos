@@ -129,10 +129,6 @@ thread_start (void)
 
 /* Called by the timer interrupt handler at each timer tick.
    Thus, this function runs in an external interrupt context. */
-static int  mlfqs_priority (int recent_cpu, int nice);
-static bool priority_more (const struct list_elem *a,
-                           const struct list_elem *b, void *aux);
-
 void
 thread_tick (void) 
 {
