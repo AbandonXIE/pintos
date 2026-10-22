@@ -11,7 +11,8 @@
 #include "threads/switch.h"
 #include "threads/synch.h"
 #include "threads/vaddr.h"
-#include "devices/timer.h" /* added */
+#include "devices/timer.h"       /* added */
+#include "threads/fixed-point.h" /* added */
 #ifdef USERPROG
 #include "userprog/process.h"
 #endif
@@ -74,6 +75,8 @@ static void *alloc_frame (struct thread *, size_t size);
 static void schedule (void);
 void thread_schedule_tail (struct thread *prev);
 static tid_t allocate_tid (void);
+
+static int load_avg = 0   /* added */
 
 /* Initializes the threading system by transforming the code
    that's currently running into a thread.  This can't work in
@@ -505,9 +508,10 @@ thread_reinherit (struct thread *t)
 
 /* Sets the current thread's nice value to NICE. */
 void
-thread_set_nice (int nice UNUSED) 
+thread_set_nice (int nice) 
 {
   /* Not yet implemented. */
+  thread_current()->nice = nice;
 }
 
 /* Returns the current thread's nice value. */
@@ -515,7 +519,7 @@ int
 thread_get_nice (void) 
 {
   /* Not yet implemented. */
-  return 0;
+  return thread_current()->nice;
 }
 
 /* Returns 100 times the system load average. */
@@ -523,7 +527,7 @@ int
 thread_get_load_avg (void) 
 {
   /* Not yet implemented. */
-  return 0;
+  return 100 * load_avg;
 }
 
 /* Returns 100 times the current thread's recent_cpu value. */
@@ -531,7 +535,7 @@ int
 thread_get_recent_cpu (void) 
 {
   /* Not yet implemented. */
-  return 0;
+  return 100 * recent_cpu;
 }
 
 /* Idle thread.  Executes when no other thread is ready to run.
@@ -624,6 +628,9 @@ init_thread (struct thread *t, const char *name, int priority)
   t->waiting_lock = NULL; 
   list_init (&t->donations);
   t->magic = THREAD_MAGIC;
+
+  t->nice = 0;
+  t->recent_cpu = 0;
 
   old_level = intr_disable ();
   list_push_back (&all_list, &t->allelem);
